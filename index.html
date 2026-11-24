@@ -56,7 +56,29 @@ button { font-family: inherit; color: inherit; }
 
 /* stage */
 .stage { flex: 1; min-height: 0; display: flex; flex-direction: column; align-items: center; gap: 8px; padding-top: 8px; }
-.status { color: var(--muted); font-size: .8rem; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; font-variant-numeric: tabular-nums; min-height: 1em; }
+.status { display: flex; align-items: baseline; justify-content: center; gap: 10px; min-height: 1.6rem; font-variant-numeric: tabular-nums; }
+.status .rl { color: var(--muted); font-size: .78rem; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; }
+.timer { font-weight: 800; font-size: .95rem; color: var(--muted); }
+.timer.countdown { font-family: var(--display); font-size: 1.6rem; color: var(--fg); line-height: 1; }
+.timer.urgent { color: #e5484d; animation: pulse 1s steps(2, start) infinite; }
+@keyframes pulse { 50% { opacity: .55; } }
+.tag { display: inline-block; font-size: .68rem; font-weight: 800; letter-spacing: .08em; text-transform: uppercase; padding: 3px 6px; border-radius: 4px; background: var(--present); color: var(--on-color); }
+
+/* lobby settings */
+.settings { display: flex; flex-direction: column; gap: 4px; border: 1px solid var(--line); border-radius: 10px; padding: 4px 14px; }
+.setrow { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding-block: 10px; }
+.setrow + .setrow { border-top: 1px solid var(--line); }
+.setrow.col { flex-direction: column; align-items: stretch; gap: 8px; }
+.sl { font-weight: 700; }
+.sd { font-size: .8rem; color: var(--muted); margin-top: 2px; line-height: 1.35; }
+.switch { flex: none; width: 48px; height: 28px; border-radius: 14px; border: 0; background: var(--line-filled); position: relative; cursor: pointer; transition: background .15s; }
+.switch::after { content: ""; position: absolute; top: 3px; left: 3px; width: 22px; height: 22px; border-radius: 50%; background: #fff; transition: transform .15s; }
+.switch[aria-pressed="true"] { background: var(--correct); }
+.switch[aria-pressed="true"]::after { transform: translateX(20px); }
+.seg { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; }
+.seg button { border: 1px solid var(--line-filled); background: none; border-radius: 6px; padding: 9px 0; font-weight: 700; font-size: .85rem; cursor: pointer; }
+.seg button[aria-pressed="true"] { background: var(--fg); color: var(--bg); border-color: var(--fg); }
+.modeline { display: flex; justify-content: center; gap: 6px; flex-wrap: wrap; }
 .boardwrap { flex: 1; min-height: 0; display: grid; place-items: center; }
 .board { display: grid; grid-template-rows: repeat(6, var(--tile)); gap: 5px; }
 .row { display: grid; grid-template-columns: repeat(5, var(--tile)); gap: 5px; }
@@ -146,7 +168,7 @@ button { font-family: inherit; color: inherit; }
   font-size: .8rem; padding: 12px 16px; text-transform: uppercase; letter-spacing: .05em; cursor: pointer; }
 .nickrow { display: flex; flex-direction: column; gap: 6px; }
 .nickrow input { font: inherit; font-size: 16px; padding: 12px; border: 1px solid var(--line-filled); border-radius: 8px; background: var(--soft); color: var(--fg); }
-:is(.primary, .secondary, .chip, .key, .x, .iconbtn):focus-visible { outline: 3px solid var(--present); outline-offset: 2px; }
+:is(.primary, .secondary, .chip, .key, .x, .iconbtn, .switch, .seg button):focus-visible { outline: 3px solid var(--present); outline-offset: 2px; }
 
 .toast { position: fixed; top: calc(62px + env(safe-area-inset-top, 0px)); left: 50%; transform: translateX(-50%);
   background: var(--toast-bg); color: var(--toast-fg); font-weight: 700; padding: 12px 16px; border-radius: 6px;
@@ -178,7 +200,7 @@ button { font-family: inherit; color: inherit; }
 <main class="stage">
   <section class="opps" id="opps" aria-label="Opponent"></section>
   <div class="center-col">
-    <div class="status" id="status"></div>
+    <div class="status" id="status"><span class="rl" id="roundlabel"></span><span class="timer" id="timer" role="timer"></span></div>
     <div class="boardwrap"><div class="board" id="board" aria-label="Your board"></div></div>
   </div>
 </main>
@@ -286,6 +308,10 @@ let room = null, user = null;
 let game = null, localStart = 0, board = emptyBoard(0), wins = 0, scoredRound = 0, ready = 0;
 let typed = "", animateRow = -1, names = {}, namesPending = false, seenOpp = {}, modalClosed = false, lastPhase = "", lastBoardKey = "";
 let nick = LS.get("versle-name", "");
+// Lobby settings are shared: the most recent change (by ts) from either player wins, and the next round uses it.
+const TIMES = [0, 60, 120, 180];
+const cleanSettings = s => ({ hard: !!s?.hard, secs: TIMES.includes(s?.secs) ? s.secs : 0, ts: Number(s?.ts) || 0 });
+let settings = cleanSettings(LS.get("versle-settings", { hard: false, secs: 120, ts: 0 }));
 
 const $ = id => document.getElementById(id);
 const valid = w => typeof w === "string" && /^[a-z]{5}$/.test(w);
@@ -298,6 +324,31 @@ function push(patch) { saveGame(); room?.presence(patch).catch?.(() => {}); }
 const isP2P = () => room?.mode === "p2p";
 const inviteLink = () => isP2P() ? room.invite : CLAUDE_LINK;
 
+// Hard mode: every revealed hint must be reused. Greens stay in place, yellows/greens keep their counts.
+const ORD = ["1st", "2nd", "3rd", "4th", "5th"];
+function hardError(guess, prev, word) {
+  for (const g of prev) {
+    const res = score(g, word), need = {};
+    for (let i = 0; i < 5; i++) if (res[i] === "correct" && guess[i] !== g[i]) return `${ORD[i]} letter must be ${g[i].toUpperCase()}`;
+    for (let i = 0; i < 5; i++) if (res[i] !== "absent") need[g[i]] = (need[g[i]] || 0) + 1;
+    for (const ch in need) if (guess.split(ch).length - 1 < need[ch]) return `Guess must contain ${ch.toUpperCase()}`;
+  }
+  return null;
+}
+function timeLeft() { return game?.secs ? game.secs * 1000 - (Date.now() - localStart) : Infinity; }
+function changeSettings(patch) {
+  settings = { ...settings, ...patch, ts: Date.now() };
+  LS.set("versle-settings", settings);
+  ready = 0; // new rules: everyone confirms again
+  push({ settings, ready }); render();
+}
+function adoptSettings() {
+  for (const p of others()) {
+    const s = p.presence.settings;
+    if (s && Number(s.ts) > settings.ts) { settings = cleanSettings(s); LS.set("versle-settings", settings); if (ready) { ready = 0; push({ ready }); } }
+  }
+}
+
 // ---- other players ----
 function others() { return room ? room.peers().filter(p => !p.sameTab && p.kind === "viewer" && p.presence?.on === true) : []; }
 function myPeer() { return room?.peers().find(p => p.sameTab)?.peer || "me"; }
@@ -306,7 +357,7 @@ function oppBoard(p) {
   const b = p.presence.board;
   if (!game || !b || b.round !== game.round || !Array.isArray(b.guesses)) return emptyBoard(game?.round || 0);
   const guesses = b.guesses.filter(valid).slice(0, 6);
-  return { round: b.round, guesses, solved: !!b.solved && guesses[guesses.length - 1] === game.word, done: !!b.done, ms: Number(b.ms) || 0 };
+  return { round: b.round, guesses, solved: !!b.solved && guesses[guesses.length - 1] === game.word, done: !!b.done, timeout: !!b.timeout, ms: Number(b.ms) || 0 };
 }
 function refreshNames() {
   const ids = others().map(p => p.by).filter(id => id && !(id in names));
@@ -345,16 +396,17 @@ function adopt() {
   for (const p of others()) {
     const g = p.presence.game;
     if (!g || !Number.isInteger(g.round) || g.round < 1 || !valid(g.word)) continue;
-    if (!best || g.round > best.round || (g.round === best.round && g.word < best.word)) best = { round: g.round, word: g.word };
+    if (!best || g.round > best.round || (g.round === best.round && g.word < best.word)) best = { round: g.round, word: g.word, ...cleanRules(g) };
   }
   if (best && (!game || best.round !== game.round || best.word !== game.word)) setGame(best);
 }
+function cleanRules(g) { const s = cleanSettings(g); return { hard: s.hard, secs: s.secs }; }
 function checkStart() {
   if (!wordsLoaded || phase() !== "lobby") return;
   const t = (game?.round || 0) + 1, os = others();
   if (ready !== t || !os.every(p => p.presence.ready === t)) return;
   if ([myPeer(), ...os.map(p => p.peer)].sort()[0] !== myPeer()) return; // leader picks the word
-  setGame({ round: t, word: pick() });
+  setGame({ round: t, word: pick(), hard: settings.hard, secs: settings.secs });
 }
 function setReady(on) { ready = on ? (game?.round || 0) + 1 : 0; push({ ready }); render(); }
 function maybeScore() {
@@ -371,6 +423,8 @@ function onKey(k) {
 function submit() {
   if (typed.length < 5) { toast("Not enough letters"); return shake(); }
   if (VALID && !VALID.has(typed)) { toast("Not in word list"); return shake(); }
+  const hardMsg = game.hard && hardError(typed, board.guesses, game.word);
+  if (hardMsg) { toast(hardMsg); return shake(); }
   const guesses = [...board.guesses, typed];
   const solved = typed === game.word, done = solved || guesses.length === 6;
   animateRow = guesses.length - 1; typed = "";
@@ -466,7 +520,7 @@ function renderOpps() {
     seenOpp[p.peer] = b.guesses.length;
     const t = (game?.round || 0) + 1;
     const sub = !inRound ? (p.presence.ready === t ? "Ready" : "In lobby")
-      : b.solved ? `Solved ${b.guesses.length}/6 · ${fmt(b.ms)}` : b.done ? "Out of guesses" : `Guess ${b.guesses.length}/6`;
+      : b.solved ? `Solved ${b.guesses.length}/6 · ${fmt(b.ms)}` : b.timeout ? "Out of time" : b.done ? "Out of guesses" : `Guess ${b.guesses.length}/6`;
     const meta = el("div", "meta");
     meta.append(el("div", "name", nameOf(p)), el("div", "sub" + (b.solved ? " ok" : ""), sub));
     wrap.append(mini, meta); box.append(wrap);
@@ -479,6 +533,28 @@ function renderScore() {
   sc.append(el("span", "who", "You"), el("span", "n", String(wins)));
   if (os[0]) sc.append(el("span", "who", "–"), el("span", "n", String(Number(os[0].presence.wins) || 0)), el("span", "who", nameOf(os[0])));
 }
+function modeLine(g) {
+  const line = el("div", "modeline");
+  line.append(el("span", "tag", g.hard ? "Hard mode" : "Normal"), el("span", "tag", g.secs ? fmt(g.secs * 1000) + " timer" : "No timer"));
+  return line;
+}
+function settingsPanel(shared) {
+  const box = el("div", "settings");
+  const hard = el("div", "setrow"), txt = el("div");
+  txt.append(el("div", "sl", "Hard mode"), el("div", "sd", "Every hint you find must be used in later guesses."));
+  const sw = el("button", "switch"); sw.dataset.act = "hard"; sw.setAttribute("aria-pressed", String(settings.hard)); sw.setAttribute("aria-label", "Hard mode");
+  hard.append(txt, sw);
+  const time = el("div", "setrow col"), tl = el("div");
+  tl.append(el("div", "sl", "Round timer"), el("div", "sd", shared ? "Applies to both players. Changing it un-readies everyone." : "Counts down from the start of each round."));
+  const seg = el("div", "seg");
+  for (const s of TIMES) {
+    const b = el("button", null, s ? s / 60 + " min" : "Off"); b.dataset.act = "secs"; b.dataset.v = s;
+    b.setAttribute("aria-pressed", String(settings.secs === s)); seg.append(b);
+  }
+  time.append(tl, seg);
+  box.append(hard, time);
+  return box;
+}
 function renderModal() {
   const ph = phase(), m = $("modal"), c = $("cardbody");
   if (ph === "play" || (ph === "lobby" && modalClosed)) { m.hidden = true; return; }
@@ -486,7 +562,7 @@ function renderModal() {
   $("nickrow").hidden = !(isP2P() && ph === "lobby");
   if (ph === "countdown") {
     const n = el("div", "count", "3"); n.id = "count";
-    c.append(el("div", "eyebrow", "Round " + game.round), n, el("p", "muted center", "Same word for everyone. First to solve wins."));
+    c.append(el("div", "eyebrow", "Round " + game.round), n, modeLine(game), el("p", "muted center", "Same word for everyone. First to solve wins."));
     tick(); return;
   }
   const r = result(), os = others(), t = (game?.round || 0) + 1;
@@ -502,7 +578,7 @@ function renderModal() {
     for (const row of r.rows) {
       const it = el("div", "player");
       it.append(el("span", "pn", row.name), el("span", "ps" + (row.b.solved ? " ok" : ""),
-        row.b.solved ? `${row.b.guesses.length}/6 · ${fmt(row.b.ms)}` : row.b.done ? "X/6" : `${row.b.guesses.length}/6`));
+        row.b.solved ? `${row.b.guesses.length}/6 · ${fmt(row.b.ms)}` : row.b.timeout ? "Out of time" : row.b.done ? "X/6" : `${row.b.guesses.length}/6`));
       list.append(it);
     }
     c.append(list);
@@ -540,6 +616,8 @@ function renderModal() {
     c.append(list);
   }
 
+  c.append(settingsPanel(os.length > 0));
+
   const btns = $("cardbtns");
   if (ready === t && os.length) {
     const wait = el("button", "primary", "Waiting for " + os.filter(p => p.presence.ready !== t).map(nameOf).join(", ") + "…"); wait.disabled = true;
@@ -552,10 +630,23 @@ function renderModal() {
   }
 }
 function tick() {
-  const ph = phase(), now = Date.now();
+  let ph = phase();
+  const now = Date.now();
+  if (ph === "play" && !board.done && timeLeft() <= 0) { // out of time: lock the board
+    typed = ""; board = { ...board, done: true, timeout: true, ms: game.secs * 1000 };
+    push({ board }); toast("Time's up"); navigator.vibrate?.(200);
+    return render();
+  }
   if (ph !== lastPhase) return render();
   if (ph === "countdown" && $("count")) $("count").textContent = Math.max(1, Math.ceil((localStart - now) / 1000));
-  $("status").textContent = !game ? "" : ph === "play" ? `Round ${game.round} · ${fmt(board.done ? board.ms : now - localStart)}` : `Round ${game.round}`;
+  $("roundlabel").textContent = game ? `Round ${game.round}` : "";
+  const t = $("timer");
+  if (!game || ph !== "play") { t.textContent = ""; t.className = "timer"; }
+  else if (game.secs) {
+    const left = board.done ? game.secs * 1000 - board.ms : timeLeft();
+    t.textContent = fmt(Math.ceil(Math.max(0, left) / 1000) * 1000);
+    t.className = "timer countdown" + (!board.done && left <= 10000 ? " urgent" : "");
+  } else { t.textContent = fmt(board.done ? board.ms : now - localStart); t.className = "timer"; }
 }
 function render(pop) {
   lastPhase = phase();
@@ -574,6 +665,8 @@ document.addEventListener("click", e => {
   if (a === "close") { modalClosed = true; render(); }
   if (a === "open") { modalClosed = false; render(); }
   if (a === "copy") copyLink(e.target.closest("button"));
+  if (a === "hard") changeSettings({ hard: !settings.hard });
+  if (a === "secs") changeSettings({ secs: Number(e.target.closest("button").dataset.v) });
 });
 $("modal").addEventListener("click", e => { if (e.target.id === "modal" && game) { modalClosed = true; render(); } });
 $("nick").value = nick;
@@ -610,9 +703,9 @@ async function start() {
   room.onPeers(ch => {
     for (const p of ch.joined) if (!p.sameTab && p.kind === "viewer") toast("Opponent connected");
     for (const p of ch.left) if (!p.sameTab && p.kind === "viewer" && p.presence?.on) toast(nameOf(p) + " left");
-    refreshNames(); adopt(); render();
+    refreshNames(); adoptSettings(); adopt(); render();
   }, () => { room = null; render(); });
-  push({ on: true, name: nick, game, board, ready, wins });
+  push({ on: true, name: nick, game, board, ready, wins, settings });
   render();
 }
 start();
